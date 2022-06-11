@@ -1,0 +1,224 @@
+---
+title: "Untitled"
+author: "ziyuliu3"
+date: "5/27/2022"
+output: pdf_document
+---
+
+```{r}
+library(GPFDA)
+library(MASS)
+library(readxl)
+library(tidyr)
+```
+
+```{r}
+rm(list = ls())
+set.seed(3)
+```
+
+```{r}
+calc_rmse = function(actual, predict){
+    return(sqrt(mean((actual - predict)^2)))
+}
+```
+
+
+
+```{r}
+df = read.csv("UNIGME-2021.csv")
+  df=df[df$Indicator=="Under-five mortality rate",]
+u5mr=df
+rm(df)
+```
+
+```{r}
+# This function is used to tune bandwidth used in loess function 
+
+loess_cv <- function (df,country, span.vals = seq(0.5, 8, by = 0.1), folds = 3){
+  require(dplyr)
+  require(bootstrap)
+  # extract data
+  df=df[df$Sex=="Total",]
+  df=df[df$Observation.Status=="Included in IGME",]
+  df=df[df$Series.Name!="UN IGME estimate",]
+  df=df[df$Geographic.area==country,]
+  df=df[df$Indicator=="Under-five mortality rate",]
+  df=df[df$Series.Name!="UN IGME estimate",]
+  df=df[df$Observation.Status=="Included in IGME",]
+  df=df[df$Sex=="Total",]
+  df$year=floor(df$REF_DATE)
+  df=df%>% arrange(year)
+  obs=df$OBS_VALUE
+  year=df$year
+  all_year = seq(min(year),2020,1)
+  # Do model selection using mean absolute error, which is more robust than squared error.
+  mean.abs.error <- numeric(length(span.vals))
+  # Quantify error for each span, using CV
+  loess.model <- function(obs, year, span){
+    loess(obs ~ year, span = span, control=loess.control(surface="direct"))
+  }
+  
+  loess.predict <- function(fit, newdata) {
+    predict(fit, newdata = newdata)
+  }
+  span.index <- 0
+  for (each.span in span.vals) {
+    span.index <- span.index + 1
+    obs.hat.cv <- crossval(obs, year, theta.fit = loess.model,
+                           theta.predict = loess.predict, span = each.span, ngroup = folds)$cv.fit
+    non.empty.indices <- !is.na(obs.hat.cv)
+    mean.abs.error[span.index]<-mean(abs(obs[non.empty.indices]
+                                         -obs.hat.cv[non.empty.indices]))
+  }
+  
+  # find the span which minimizes error
+  best.span <- span.vals[which.min(mean.abs.error)]
+  
+  # fit and return the best model
+  best.model <- loess(obs~year,span=best.span,
+                      control=loess.control(surface="direct"))
+  pred = predict(best.model, all_year)
+  pred_df = data.frame(fitted = pred, year = all_year)
+  return(list(model = best.model, year = year, pred_df = pred_df))
+}
+```
+
+```{r}
+# This is a helper function used to tune nu value used in gpr function
+cv_k = function(df, nu, k, loess_mean) {
+  # Extract and separate the data
+  n = nrow(df)
+  chunk_length = n/k
+  idx = 1:n
+  val = split(idx, ceiling(seq_along(idx) / chunk_length))
+  cv_sums = 0
+  # Cross-validate
+  for (i in val) {
+    # Extract train and test data
+    tst_df = df[i,]
+    trn_df = df[-i, ]
+    # Average the survey series' values for each years
+    trn_df = trn_df %>% group_by(REF_DATE) %>% summarise_at(vars(OBS_VALUE), list(name = mean))
+    tst_df = tst_df %>% group_by(REF_DATE) %>% summarise_at(vars(OBS_VALUE), list(name = mean))
+    trn_df = trn_df[order(trn_df$REF_DATE),]
+    tst_df = tst_df[order(tst_df$REF_DATE),]
+    #Find the year corresponded loess fitted value as the prior mean value
+    tst_years = unique(tst_df$REF_DATE)
+    trn_years = unique(trn_df$REF_DATE)
+    trn_loess = loess_mean[which(loess_mean$year %in% trn_years),]
+    tst_loess = loess_mean[which(loess_mean$year %in% tst_years),]
+    # Fit train model
+    trn_fit = gpr(response = trn_df$name - trn_loess$fitted, input = trn_df$REF_DATE, Cov = "matern", nu = nu)
+    trn_fit_val = trn_fit$fitted.mean + trn_loess$fitted
+    # Predict the test data
+    pred_val = gprPredict(train = trn_fit, inputNew = tst_years)
+    tst_fit_val = pred_val$pred.mean[,1] + tst_loess$fitted
+    # Calculate RMSE
+    cv_sums = cv_sums + calc_rmse(tst_df$name, tst_fit_val)
+  }
+  return(cv_sums)
+}
+```
+
+
+
+```{r}
+# This function used to tune nu values used in gpr function
+cv_gpr = function(u5mr, country, nu, k, loess_mean) {
+  # Extract data
+  country_df = u5mr[which(u5mr$Geographic.area == country & u5mr$ Sex == 'Total'), ]
+  country_survey = country_df[which(country_df$Series.Name != "UN IGME estimate" & country_df$Observation.Status == "Included in IGME"), ]
+  country_survey$REF_DATE = as.integer(floor(country_survey$REF_DATE))
+  # Use helper function calculate the RMSE
+  rmse_val = cv_k(country_survey, nu, k, loess_mean)
+  return(rmse_val)
+}
+```
+
+
+```{r}
+nus = c(seq(2, 7, 1),2/3,5/2)
+```
+
+```{r}
+# This is a function used to plot the estimated and predicted values
+plot_function = function(u5mr, country, nu_list, k = 3) {
+  # Use loess_cv find the best model used to generate the prior mean
+  loessMod = loess_cv(u5mr, country, folds = k)
+  loess_df=loessMod$pred_df
+  # Select the best nu used in the gpr function
+  nu_rmse = c()
+  for (i in nu_list) {
+    nu_rmse = c(nu_rmse, cv_gpr(u5mr, country, nu = i, k, loess_df))
+  }
+  nu_val = nus[which.min(nu_rmse)]
+  # Extract data used to fit in the model
+  country_df = u5mr[which(u5mr$Geographic.area == country & u5mr$Sex == "Total"),]
+  country_survey = country_df[which(country_df$Series.Name != "UN IGME estimate" & country_df$Observation.Status == "Included in IGME"), ]
+  country_survey$REF_DATE = as.integer(floor(country_survey$REF_DATE))
+  trn_df = country_survey
+  # Calculate survey series' mean to fit in the gpr function
+  trn_df = trn_df %>% group_by(REF_DATE) %>% summarise_at(vars(OBS_VALUE), list(name = mean))
+  trn_df = trn_df[order(trn_df$REF_DATE),]
+  trn_years = unique(trn_df$REF_DATE)
+  trn_loess = predict(loessMod$model,trn_years)
+  # Build the gpr model
+  trn_fit = gpr(response = trn_df$name-trn_loess, input = trn_df$REF_DATE, Cov = "matern", nu = nu_val)
+  trn_fit$fitted.mean=trn_fit$fitted.mean+trn_loess
+  # Extract IGME estimates
+  IGME = u5mr[which(u5mr$Geographic.area == country & u5mr$ Sex == 'Total'), ]
+  IGME=IGME[IGME$Series.Name=="UN IGME estimate",]
+  IGME$REF_DATE= as.integer(floor(IGME$REF_DATE))
+  IGME=IGME[IGME$Wealth.Quintile=="Total",]
+  # Fit in the gpr model with the loess fitted value as the prior mean
+  year=seq(min(trn_years),max(trn_years)+5,1)
+  loess_fit=predict(loessMod$model,year)
+  l=length(loess_fit)-5
+  mu=c(loess_fit[1:l],rep(trn_fit$fitted.mean[length(trn_fit$fitted.mean)],5))
+  gpr_fit=gprPredict(train=trn_fit,inputNew =year,Cov="matern",nu=nu_val)
+  gpr_fit$pred.mean=gpr_fit$pred.mean+mu
+  
+  gpr_fit$train.yOri=NULL
+  # plot values
+  plot(gpr_fit,main=country)
+  abline(v=max(trn_years))
+  points(country_survey$REF_DATE,country_survey$OBS_VALUE)
+  lines(year, loess_fit,col="red")
+  lines(IGME$REF_DATE,IGME$OBS_VALUE,col="purple")
+  lines(IGME$REF_DATE,IGME$UPPER_BOUND,col="purple",lty=2)
+  lines(IGME$REF_DATE,IGME$LOWER_BOUND,col="purple",lty=2)
+  legend(x = "topright", legend=c("Loess", "GPR","UN IGME"),
+         col=c("red", "blue","purple"), lty=1, cex=0.8)
+  print("rmse ")
+}
+```
+
+
+```{r}
+#Fiji ,Nigeria, Latvia,Australia, Sudan,Bhutan
+plot_function(u5mr, "Latvia", nus)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

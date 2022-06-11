@@ -1,0 +1,56 @@
+---
+title: "dataplot"
+author: "Wanying Rao"
+date: "2022/6/10"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(GPFDA)
+library(ggplot2)
+```
+
+```{r}
+# This is a Fiji example for our data preprocessing
+# Extract Fiji
+fiji <- read.csv("Fiji.csv", header=TRUE)
+fiji <- fiji[fiji$SERIES_NAME.Series.Name!="UN_IGME: UN IGME estimate",]
+fiji <- fiji[fiji$OBS_STATUS.Observation.Status=="IN: Included in IGME",]
+fiji <- fiji[fiji$REF_DATE.Reference.Date<max(fiji$REF_DATE.Reference.Date)-10,]
+fiji$REF_DATE.Reference.Date <- floor(fiji$REF_DATE.Reference.Date)
+
+# Plot each survey series value in the plot
+
+ggplot(fiji, aes(x = REF_DATE.Reference.Date, y = OBS_VALUE.Observation.Value, group = SERIES_NAME.Series.Name, colour = SERIES_NAME.Series.Name)) + 
+  geom_line() +
+  geom_point() +
+  ggtitle("UNDER-FIVE MORTALITY RATE in Fiji") +
+  xlab("Year") + 
+  ylab("U5MR") +
+  scale_color_discrete(name = "Survey")
+
+years <- unique(fiji$REF_DATE.Reference.Date)
+years <- sort(years)
+
+# We calculate the mean for all the survey series for a certain year
+
+df <- data.frame(1,1)
+names(df) <- c("year","mean")
+for (i in 1:length(years)){
+  df[nrow(df)+1,] = c(years[i],mean(fiji$OBS_VALUE.Observation.Value[fiji$REF_DATE.Reference.Date== years[i]]))
+}
+df <- df[-1, ]
+par(pin = c(2.5,3))
+# plot the data which will be used in model
+ggplot(df, aes(x = year, y = mean)) + 
+  geom_line() +
+  geom_point() +
+  ggtitle("UNDER-FIVE MORTALITY RATE (mean) in Fiji") +
+  theme(plot.title = element_text(size = 6, face = "bold"))+
+  xlab("Year") +
+  ylab("Mean")
+ggsave(file="fiji_mean.png", width=2.5, height=3, dpi=300)
+```
+
